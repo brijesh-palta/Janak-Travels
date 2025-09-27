@@ -103,14 +103,18 @@ pipeline {
       }
     }
 
-    stage('7) Smoke on Staging') {
-      steps {
+   stage('7) Smoke on Staging') {
+    steps {
         bat '''
-        curl -fsS http://localhost:%STAGING_PORT%/health.php || exit /b 1
-        curl -I http://localhost:%STAGING_PORT%/ | find "200" >nul || exit /b 1
+        REM --- Health endpoint check ---
+        curl -fsS http://localhost:8081/health.php || exit /b 1
+
+        REM --- Login page availability check ---
+        curl -s -o /dev/null -w "HTTP_CODE=%{http_code}\\n" http://localhost:8081/loginpage.php | find "200" >nul 2>&1
         '''
-      }
     }
+}
+
 
     stage('8) Push to Registry (main only)') {
       when { branch 'main' }

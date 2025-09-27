@@ -3,7 +3,7 @@ pipeline {
 
   environment {
     IMAGE_NAME = "janak-travels"
-    REGISTRY   = "ghcr.io/<your-user>"   // e.g. ghcr.io/brijesh-palta
+    REGISTRY   = "ghcr.io/brijesh-palta"
     IMAGE_TAG  = ""                      // set in Stage 1
   }
 

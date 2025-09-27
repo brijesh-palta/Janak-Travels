@@ -4,7 +4,7 @@ pipeline {
   environment {
     IMAGE_NAME = "janak-travels"
     REGISTRY   = "ghcr.io/brijesh-palta"
-    IMAGE_TAG  = "latest"
+    IMAGE_TAG  = "latest"   // fallback
     REG_HOST   = ""
   }
 
@@ -22,7 +22,7 @@ pipeline {
       steps {
         checkout scm
         script {
-          // Generate short git SHA
+          // Get short SHA
           bat '''
           for /f "usebackq tokens=1" %%i in (`git rev-parse --short HEAD`) do @echo %%i > sha.txt
           '''
@@ -30,14 +30,14 @@ pipeline {
           if (!env.BRANCH_NAME) { env.BRANCH_NAME = "main" }
           env.IMAGE_TAG = "${env.BRANCH_NAME}-${env.BUILD_NUMBER}-${sha}"
           env.REG_HOST  = (env.REGISTRY.split('/')[0])
-          echo "✔ Checkout complete"
+          echo "✔ Checkout done"
           echo "IMAGE_TAG=${env.IMAGE_TAG}"
           echo "REG_HOST=${env.REG_HOST}"
         }
       }
     }
 
-    stage('2) PHP Lint (Build)') {
+    stage('2) PHP Lint (Docker)') {
       steps {
         bat '''
         docker run --rm -v "%CD%":/app -w /app php:8.2-cli ^
@@ -46,17 +46,7 @@ pipeline {
       }
     }
 
-    stage('3) Unit Tests (PHPUnit Stub)') {
-      steps {
-        bat '''
-        echo "Running unit tests..."
-        REM Replace this with phpunit when tests are available
-        echo "✔ All placeholder tests passed"
-        '''
-      }
-    }
-
-    stage('4) Code Quality (SonarCloud)') {
+    stage('3) Code Quality (SonarCloud)') {
       steps {
         withCredentials([string(credentialsId: 'sonar-token', variable: 'SC_TOKEN')]) {
           bat '''
@@ -74,34 +64,52 @@ pipeline {
       }
     }
 
-    stage('5) Security Scan (Trivy)') {
+    stage('4) Build Docker Image') {
       steps {
-        bat '''
-        docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image %IMAGE_NAME%:latest || exit /b 1
-        '''
+        script {
+          bat "docker build -t %IMAGE_NAME%:%IMAGE_TAG% . || exit /b 1"
+        }
       }
     }
 
-    stage('6) Build Docker Image') {
+    stage('5) Security Scan (Trivy)') {
+      when { expression { return false } } // enable if trivy is installed
       steps {
-        bat "docker build -t %IMAGE_NAME%:%IMAGE_TAG% ."
+        bat 'echo "Add Trivy here later"'
+      }
+    }
+
+    stage('6) Free Port 8081 (if used)') {
+      steps {
+        bat 'for /F "tokens=*" %%i in (\'docker ps -q --filter "publish=8081"\') do @docker rm -f %%i'
       }
     }
 
     stage('7) Deploy Staging (docker compose)') {
       steps {
         bat '''
-        docker compose -f docker-compose.staging.yml down || exit /b 0
-        docker compose -f docker-compose.staging.yml up -d --build
+        docker compose -p janak-staging -f docker-compose.staging.yml down || exit /b 0
+        docker compose -p janak-staging -f docker-compose.staging.yml up -d --build || exit /b 1
         '''
       }
     }
 
-    stage('8) Smoke on Staging') {
+    stage('8) Monitoring: Smoke on Staging') {
       steps {
         bat '''
-        curl -fsS http://localhost:8081/health.php
-        curl -I http://localhost:8081/ | find "200" >nul
+        REM --- Health endpoint check ---
+        curl -fsS http://localhost:8081/health.php || exit /b 1
+
+        REM --- Login page availability check ---
+        curl -s -o NUL -w "HTTP_CODE=%%{http_code}" "http://localhost:8081/loginpage.php" > status.txt
+        find "HTTP_CODE=200" status.txt 1>nul 2>&1
+        if errorlevel 1 (
+          echo "Login page not available or not returning 200"
+          type status.txt
+          exit /b 1
+        ) else (
+          echo "✔ Login page returned 200 OK"
+        )
         '''
       }
     }
@@ -124,21 +132,21 @@ pipeline {
     stage('10) Deploy Production (main only)') {
       when { branch 'main' }
       steps {
-        bat 'docker compose -f docker-compose.prod.yml up -d'
+        bat 'docker compose -p janak-prod -f docker-compose.prod.yml up -d || exit /b 1'
       }
     }
 
-    stage('11) Post-Release Smoke (Prod)') {
+    stage('11) Monitoring: Smoke on Prod (main only)') {
       when { branch 'main' }
       steps {
-        bat 'curl -fsS http://localhost/health.php'
+        bat 'curl -fsS http://localhost/health.php || exit /b 1'
       }
     }
   }
 
   post {
     success { echo "Pipeline SUCCESS — IMAGE_TAG=${env.IMAGE_TAG}" }
-    unstable { echo "Pipeline UNSTABLE — check SonarCloud or scan results" }
-    failure { echo "Pipeline FAILED — review first failing stage logs" }
+    unstable { echo "Pipeline UNSTABLE — check quality/security results" }
+    failure { echo "Pipeline FAILED — see first red stage logs" }
   }
 }

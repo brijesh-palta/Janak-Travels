@@ -3,9 +3,9 @@ pipeline {
 
   environment {
     IMAGE_NAME = "janak-travels"
-    REGISTRY   = "ghcr.io/brijesh-palta"      // <- apna namespace
+    REGISTRY   = "ghcr.io/brijesh-palta"
     IMAGE_TAG  = ""
-    REG_HOST   = ""                           // computed once
+    REG_HOST   = ""
   }
 
   options {
@@ -22,10 +22,9 @@ pipeline {
       steps {
         checkout scm
         script {
-          // short git sha from plugin env (no shell on Windows)
           def shortSha = (env.GIT_COMMIT ?: "local").take(7)
           env.IMAGE_TAG = "${env.BRANCH_NAME}-${env.BUILD_NUMBER}-${shortSha}"
-          env.REG_HOST  = (env.REGISTRY.split('/')[0])   // e.g. ghcr.io
+          env.REG_HOST  = (env.REGISTRY.split('/')[0])
           echo "IMAGE_TAG=${env.IMAGE_TAG}  REG_HOST=${env.REG_HOST}"
         }
       }
@@ -33,20 +32,18 @@ pipeline {
 
     stage('2) PHP Lint (via Docker)') {
       steps {
-        // run php:8.2-cli container to lint every *.php file
         bat '''
         docker run --rm -v "%CD%":/app -w /app php:8.2-cli ^
-          bash -lc "set -e; find . -type f -name \'*.php\' -print0 | xargs -0 -n1 php -l"
+          bash -lc "set -e; find . -type f -name '*.php' -print0 | xargs -0 -n1 php -l"
         '''
       }
     }
 
-    stage('3) Code Quality (Sonar)') {
+    stage('3) Code Quality (SonarQube)') {
       steps {
         script {
           try {
             withSonarQubeEnv('MySonar') {
-              // Use official sonar-scanner container (no local install needed)
               bat '''
               docker run --rm ^
                 -e SONAR_HOST_URL=%SONAR_HOST_URL% ^
@@ -64,7 +61,6 @@ pipeline {
       post {
         success {
           script {
-            // waits only if Sonar plugin/webhook is configured
             try {
               timeout(time: 5, unit: 'MINUTES') {
                 def qg = waitForQualityGate()
@@ -82,11 +78,10 @@ pipeline {
       }
     }
 
-    // (Optional) You can move Trivy after Push and scan remote image; here we keep it simple:
-    stage('5) Container Scan (optional)') {
-      when { expression { return false } } // enable later if you install Trivy
+    stage('5) Container Scan (Trivy)') {
+      when { expression { return false } } // enable later if Trivy installed
       steps {
-        bat 'echo "Add Trivy here if needed"'
+        bat 'echo "Add Trivy scanning here if needed"'
       }
     }
 
@@ -123,7 +118,7 @@ pipeline {
       }
     }
 
-    stage('9) Deploy Production (compose, main only)') {
+    stage('9) Deploy Production (main only)') {
       when { branch 'main' }
       steps {
         bat '''
@@ -142,8 +137,8 @@ pipeline {
   }
 
   post {
-    success { echo "All 10 stages  %IMAGE_TAG%" }
-    unstable { echo "Pipeline UNSTABLE — check Sonar/optional scan." }
-    failure { echo "Pipeline failed — see the first red stage logs." }
+    success { echo "All 10 stages succeeded — %IMAGE_TAG%" }
+    unstable { echo "Pipeline UNSTABLE — check Sonar/scan results." }
+    failure { echo "Pipeline failed — see red stage logs." }
   }
 }

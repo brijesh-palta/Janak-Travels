@@ -4,11 +4,10 @@ pipeline {
   environment {
     IMAGE_NAME = "janak-travels"
     REGISTRY   = "ghcr.io/brijesh-palta"
-    IMAGE_TAG  = ""                      // set in Stage 1
+    IMAGE_TAG  = ""
   }
 
   options {
-    ansiColor('xterm')
     timestamps()
     skipDefaultCheckout(true)
     buildDiscarder(logRotator(numToKeepStr: '30'))
@@ -17,7 +16,6 @@ pipeline {
   triggers { pollSCM('H/5 * * * *') }
 
   stages {
-
     stage('1) Checkout & Version') {
       steps {
         checkout scm
@@ -62,9 +60,7 @@ pipeline {
     }
 
     stage('4) Build Docker Image') {
-      steps {
-        sh 'docker build -t ${IMAGE_NAME}:${IMAGE_TAG} .'
-      }
+      steps { sh 'docker build -t ${IMAGE_NAME}:${IMAGE_TAG} .' }
     }
 
     stage('5) Container Scan (Trivy)') {
@@ -94,7 +90,6 @@ pipeline {
         sh '''
           set -e
           curl -fsS http://localhost:8081/health.php | grep '"ok":true'
-          # optional: homepage HTTP status
           curl -I http://localhost:8081/ | head -n 1
         '''
       }
@@ -127,17 +122,12 @@ pipeline {
 
     stage('10) Post-Release Smoke (Prod)') {
       when { branch 'main' }
-      steps {
-        sh '''
-          set -e
-          curl -fsS http://localhost/health.php | grep '"ok":true'
-        '''
-      }
+      steps { sh 'curl -fsS http://localhost/health.php | grep \'"ok":true\'' }
     }
   }
 
   post {
-    success { echo "All 10 stages ${env.IMAGE_TAG}" }
-    failure { echo "Pipeline failed — check the gated stage output." }
+    success { echo "All 10 stages  ${env.IMAGE_TAG}" }
+    failure { echo "Pipeline failed — check the failing stage logs." }
   }
 }

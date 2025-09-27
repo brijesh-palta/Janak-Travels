@@ -2,10 +2,15 @@ pipeline {
   agent any
 
   environment {
-    IMAGE_NAME = "janak-travels"
-    REGISTRY   = "ghcr.io/brijesh-palta"
-    IMAGE_TAG  = ""
-    REG_HOST   = ""
+    IMAGE_NAME         = "janak-travels"
+    REGISTRY           = "ghcr.io/brijesh-palta"           // <— change if needed
+    IMAGE_TAG          = ""
+    REG_HOST           = ""                                // computed
+    SONAR_HOST_URL     = "https://sonarcloud.io"
+    SONAR_ORG          = "brijesh-palta"                   // <— your SonarCloud org
+    SONAR_PROJECT_KEY  = "janak-travels"                   // <— your SonarCloud project key
+    SONAR_DASHBOARD    = "https://sonarcloud.io/project/overview?id=janak-travels"
+    GITHUB_REPO_URL    = "https://github.com/brijesh-palta/Janak-Travels"
   }
 
   options {
@@ -14,7 +19,7 @@ pipeline {
     buildDiscarder(logRotator(numToKeepStr: '30'))
   }
 
-  triggers { pollSCM('H/5 * * * *') }
+  triggers { pollSCM('H/5 * * * *') }  // webhook ho to hata do
 
   stages {
 
@@ -22,16 +27,20 @@ pipeline {
       steps {
         checkout scm
         script {
-          def shortSha = (env.GIT_COMMIT ?: "local").take(7)
-          env.IMAGE_TAG = "${env.BRANCH_NAME}-${env.BUILD_NUMBER}-${shortSha}"
-          env.REG_HOST  = (env.REGISTRY.split('/')[0])
-          echo "IMAGE_TAG=${env.IMAGE_TAG}  REG_HOST=${env.REG_HOST}"
+          // Windows-safe short SHA
+          bat 'for /f "usebackq tokens=1" %i in (`git rev-parse --short HEAD`) do @echo %i>sha.txt'
+          def sha = readFile('sha.txt').trim()
+          env.IMAGE_TAG = "${env.BRANCH_NAME}-${env.BUILD_NUMBER}-${sha}"
+          env.REG_HOST  = (env.REGISTRY.split('/')[0])   // e.g. ghcr.io
+          echo "IMAGE_TAG=${env.IMAGE_TAG} | REG_HOST=${env.REG_HOST}"
+          echo "Repo: ${env.GITHUB_REPO_URL}"
         }
       }
     }
 
     stage('2) PHP Lint (via Docker)') {
       steps {
+        // Lint all PHP files using official PHP image (no local PHP needed)
         bat '''
         docker run --rm -v "%CD%":/app -w /app php:8.2-cli ^
           bash -lc "set -e; find . -type f -name '*.php' -print0 | xargs -0 -n1 php -l"
@@ -39,35 +48,20 @@ pipeline {
       }
     }
 
-    stage('3) Code Quality (SonarQube)') {
+    stage('3) Code Quality (SonarCloud)') {
       steps {
-        script {
-          try {
-            withSonarQubeEnv('MySonar') {
-              bat '''
-              docker run --rm ^
-                -e SONAR_HOST_URL=%SONAR_HOST_URL% ^
-                -e SONAR_TOKEN=%SONAR_AUTH_TOKEN% ^
-                -v "%CD%":/usr/src sonarsource/sonar-scanner-cli:5 ^
-                sonar-scanner -Dsonar.projectKey=janak-travels -Dsonar.sources=.
-              '''
-            }
-          } catch (err) {
-            currentBuild.result = 'UNSTABLE'
-            echo "Sonar stage skipped/unstable: ${err}"
-          }
-        }
-      }
-      post {
-        success {
-          script {
-            try {
-              timeout(time: 5, unit: 'MINUTES') {
-                def qg = waitForQualityGate()
-                if (qg.status != 'OK') error "Quality Gate failed: ${qg.status}"
-              }
-            } catch (e) { echo "QualityGate wait skipped: ${e.message}" }
-          }
+        withCredentials([string(credentialsId: 'sonar-token', variable: 'SC_TOKEN')]) {
+          // Dockerized sonar-scanner; no Jenkins plugin required
+          bat '''
+          docker run --rm ^
+            -e SONAR_TOKEN=%SC_TOKEN% ^
+            -v "%CD%":/usr/src sonarsource/sonar-scanner-cli:5 ^
+            sonar-scanner ^
+              -Dsonar.host.url=%SONAR_HOST_URL% ^
+              -Dsonar.organization=%SONAR_ORG% ^
+              -Dsonar.projectKey=%SONAR_PROJECT_KEY% ^
+              -Dsonar.sources=.
+          '''
         }
       }
     }
@@ -78,11 +72,10 @@ pipeline {
       }
     }
 
+    // Enable later if you install Trivy on Windows host
     stage('5) Container Scan (Trivy)') {
-      when { expression { return false } } // enable later if Trivy installed
-      steps {
-        bat 'echo "Add Trivy scanning here if needed"'
-      }
+      when { expression { return false } }
+      steps { bat 'echo Skipping Trivy on Windows (optional stage)' }
     }
 
     stage('6) Deploy Staging (docker compose)') {
@@ -121,6 +114,7 @@ pipeline {
     stage('9) Deploy Production (main only)') {
       when { branch 'main' }
       steps {
+        // docker-compose.prod.yml should use the image %REGISTRY%/%IMAGE_NAME%:%IMAGE_TAG%
         bat '''
         set IMAGE_TAG=%IMAGE_TAG%
         docker compose -f docker-compose.prod.yml up -d
@@ -137,8 +131,11 @@ pipeline {
   }
 
   post {
-    success { echo "All 10 stages succeeded — %IMAGE_TAG%" }
-    unstable { echo "Pipeline UNSTABLE — check Sonar/scan results." }
-    failure { echo "Pipeline failed — see red stage logs." }
+    success {
+      echo "All 10 stages OK | Image: %REGISTRY%/%IMAGE_NAME%:%IMAGE_TAG%"
+      echo "GitHub: ${env.GITHUB_REPO_URL}"
+      echo "SonarCloud: ${env.SONAR_DASHBOARD}"
+    }
+    failure { echo "Pipeline failed — check first red stage logs." }
   }
 }

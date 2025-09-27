@@ -103,18 +103,18 @@ pipeline {
       }
     }
 
-   stage('7) Smoke on Staging') {
+  stage('7) Smoke on Staging') {
     steps {
         bat '''
         REM --- Health endpoint check ---
         curl -fsS http://localhost:8081/health.php || exit /b 1
 
         REM --- Login page availability check ---
-        curl -s -o /dev/null -w "HTTP_CODE=%{http_code}\\n" http://localhost:8081/loginpage.php | find "200" >nul 2>&1
+        curl -s -o NUL -w "HTTP_CODE=%{http_code}\\n" http://localhost:8081/loginpage.php | find "HTTP_CODE=200" >nul 2>&1
+        if errorlevel 1 exit /b 1
         '''
     }
 }
-
 
     stage('8) Push to Registry (main only)') {
       when { branch 'main' }

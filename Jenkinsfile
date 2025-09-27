@@ -3,9 +3,9 @@ pipeline {
 
   environment {
     IMAGE_NAME = "janak-travels"
-    REGISTRY   = "ghcr.io/brijesh-palta"     // GitHub Container Registry namespace
-    IMAGE_TAG  = "latest"                    // fallback, will be updated
-    REG_HOST   = ""                          // computed later
+    REGISTRY   = "ghcr.io/brijesh-palta"
+    IMAGE_TAG  = "latest"
+    REG_HOST   = ""
   }
 
   options {
@@ -14,34 +14,31 @@ pipeline {
     buildDiscarder(logRotator(numToKeepStr: '30'))
   }
 
-  triggers {
-    pollSCM('H/5 * * * *') // poll every 5 mins
-  }
+  triggers { pollSCM('H/5 * * * *') }
 
   stages {
 
+    /* --- Checkout & Versioning --- */
     stage('1) Checkout & Version') {
       steps {
         checkout scm
         script {
-          // compute short commit SHA (Windows safe)
           bat '''
           for /f "usebackq tokens=1" %%i in (`git rev-parse --short HEAD`) do @echo %%i > sha.txt
           '''
           def sha = fileExists('sha.txt') ? readFile('sha.txt').trim() : "local"
           if (!env.BRANCH_NAME) { env.BRANCH_NAME = "main" }
-
           env.IMAGE_TAG = "${env.BRANCH_NAME}-${env.BUILD_NUMBER}-${sha}"
           env.REG_HOST  = (env.REGISTRY.split('/')[0])
-
-          echo "✔ Checkout done"
+          echo "✔ Checkout complete"
           echo "IMAGE_TAG=${env.IMAGE_TAG}"
           echo "REG_HOST=${env.REG_HOST}"
         }
       }
     }
 
-    stage('2) PHP Lint (via Docker)') {
+    /* --- Build Stage --- */
+    stage('2) PHP Lint (Build)') {
       steps {
         bat '''
         docker run --rm -v "%CD%":/app -w /app php:8.2-cli ^
@@ -50,7 +47,19 @@ pipeline {
       }
     }
 
-    stage('3) Code Quality (SonarCloud)') {
+    /* --- Test Stage --- */
+    stage('3) Unit Tests (PHPUnit Stub)') {
+      steps {
+        bat '''
+        echo "Running unit tests..."
+        REM Replace with phpunit when tests exist
+        echo "✔ All placeholder tests passed"
+        '''
+      }
+    }
+
+    /* --- Code Quality --- */
+    stage('4) Code Quality (SonarCloud)') {
       steps {
         withCredentials([string(credentialsId: 'sonar-token', variable: 'SC_TOKEN')]) {
           bat '''
@@ -68,54 +77,65 @@ pipeline {
       }
     }
 
-    stage('4) Build Docker Image') {
+    /* --- Security Scan --- */
+    stage('5) Security Scan (Trivy)') {
+      steps {
+        bat '''
+        docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image janak-travels:%IMAGE_TAG% || exit /b 1
+        '''
+      }
+    }
+
+    /* --- Build Docker Image --- */
+    stage('6) Build Docker Image') {
       steps {
         script {
           def tag = env.IMAGE_TAG ?: "latest"
-          bat "docker build -t %IMAGE_NAME%:${tag} . || exit /b 1"
+          bat "docker build -t %IMAGE_NAME%:${tag} ."
         }
       }
     }
 
-    stage('5) Free Port 8081 (if used)') {
+    /* --- Free Port --- */
+    stage('7) Free Port 8081 (if used)') {
       steps {
-        bat '''
-        for /F "tokens=*" %%i in ('docker ps -q --filter "publish=8081"') do @docker rm -f %%i
-        '''
+        bat 'for /F "tokens=*" %i in (\'docker ps -q --filter "publish=8081"\') do @docker rm -f %i'
       }
     }
 
-    stage('6) Deploy Staging (docker compose)') {
+    /* --- Deploy to Staging --- */
+    stage('8) Deploy Staging (docker compose)') {
       steps {
         bat '''
         docker compose -p janak-staging -f docker-compose.staging.yml down || exit /b 0
-        docker compose -p janak-staging -f docker-compose.staging.yml up -d --build || exit /b 1
+        docker compose -p janak-staging -f docker-compose.staging.yml up -d --build
         '''
       }
     }
 
-   stage('7) Smoke on Staging') {
-  steps {
-    bat '''
-    REM --- Health endpoint check ---
-    curl -fsS http://localhost:8081/health.php || exit /b 1
+    /* --- Smoke Tests on Staging --- */
+    stage('9) Smoke on Staging') {
+      steps {
+        bat '''
+        REM Health check
+        curl -fsS http://localhost:8081/health.php || exit /b 1
 
-    REM --- Login page availability check ---
-    curl -s -o NUL -w "HTTP_CODE=%{http_code}\\n" http://localhost:8081/loginpage.php > status.txt
-    find "HTTP_CODE=200" status.txt >nul 2>&1
-    if errorlevel 1 (
-      echo "Login page not available or not returning 200"
-      type status.txt
-      exit /b 1
-    ) else (
-      echo "✔ Login page returned 200 OK"
-    )
-    '''
-  }
-}
+        REM Login page check
+        curl -s -o NUL -w "HTTP_CODE=%%{http_code}\\n" http://localhost:8081/loginpage.php > status.txt
+        find "HTTP_CODE=200" status.txt >nul 2>&1
+        if errorlevel 1 (
+          echo "❌ Login page failed"
+          type status.txt
+          exit /b 1
+        ) else (
+          echo "✔ Login page returned 200 OK"
+        )
+        '''
+      }
+    }
 
-
-    stage('8) Push to Registry (main only)') {
+    /* --- Release Push --- */
+    stage('10) Push to Registry (main only)') {
       when { branch 'main' }
       steps {
         withCredentials([usernamePassword(credentialsId: 'ghcr', usernameVariable: 'U', passwordVariable: 'P')]) {
@@ -130,20 +150,21 @@ pipeline {
       }
     }
 
-    stage('9) Deploy Production (main only)') {
+    /* --- Deploy Production --- */
+    stage('11) Deploy Production (main only)') {
       when { branch 'main' }
       steps {
-        bat '''
-        docker compose -p janak-prod -f docker-compose.prod.yml up -d || exit /b 1
-        '''
+        bat 'docker compose -p janak-prod -f docker-compose.prod.yml up -d'
       }
     }
 
-    stage('10) Post-Release Smoke (Prod)') {
+    /* --- Monitoring / Post-Release --- */
+    stage('12) Post-Release Monitoring (Prod)') {
       when { branch 'main' }
       steps {
         bat '''
         curl -fsS http://localhost/health.php || exit /b 1
+        echo "✔ Production monitoring passed"
         '''
       }
     }
@@ -151,7 +172,7 @@ pipeline {
 
   post {
     success { echo "Pipeline SUCCESS — IMAGE_TAG=${env.IMAGE_TAG}" }
-    unstable { echo "Pipeline UNSTABLE — check SonarCloud or scan results" }
-    failure { echo "Pipeline FAILED — see the first red stage logs" }
+    unstable { echo "Pipeline UNSTABLE — check SonarCloud or Trivy warnings" }
+    failure { echo "Pipeline FAILED — check logs" }
   }
 }

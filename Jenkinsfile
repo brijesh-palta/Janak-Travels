@@ -106,17 +106,15 @@ pipeline {
      ********************/
     stage('3) Code Quality (SonarCloud)') {
       steps {
-        withCredentials([string(credentialsId: 'sonar-token', variable: 'SC_TOKEN')]) {
-          bat """
-          docker run --rm -e SONAR_TOKEN=%SONAR_TOKEN% ^
-            -v "%WORKSPACE%":/usr/src sonarsource/sonar-scanner-cli:5 ^
-            sonar-scanner ^
-              -Dsonar.host.url=${SONAR_HOST_URL} ^
-              -Dsonar.organization=${SONAR_ORG} ^
-              -Dsonar.projectKey=${SONAR_PROJECTKEY} ^
-              -Dsonar.sources=. ^
-              -Dsonar.exclusions=**/node_modules/**,**/*.jpg,**/*.png,**/*.css,**/*.js
-          """
+       withCredentials([string(credentialsId: 'sonar-token', variable: 'SC_TOKEN')]) {
+            bat """
+            docker run --rm -e SONAR_TOKEN=%SC_TOKEN% ^
+              -v "%WORKSPACE%":/usr/src sonarsource/sonar-scanner-cli:5 ^
+              sonar-scanner ^
+                -Dsonar.host.url=https://sonarcloud.io ^
+                -Dsonar.organization=brijesh-palta ^
+                -Dsonar.projectKey=Janak-Travels
+            """
         }
       }
     }

@@ -106,7 +106,7 @@ pipeline {
      ********************/
     stage('3) Code Quality (SonarCloud)') {
       steps {
-        withCredentials([string(credentialsId: 'sonarcloud-token', variable: 'SONAR_TOKEN')]) {
+        withCredentials([string(credentialsId: 'sonar-token', variable: 'SC_TOKEN')]) {
           bat """
           docker run --rm -e SONAR_TOKEN=%SONAR_TOKEN% ^
             -v "%WORKSPACE%":/usr/src sonarsource/sonar-scanner-cli:5 ^

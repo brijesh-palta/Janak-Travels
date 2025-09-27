@@ -3,12 +3,12 @@ pipeline {
 
   environment {
     IMAGE_NAME         = "janak-travels"
-    REGISTRY           = "ghcr.io/brijesh-palta"           // <— change if needed
+    REGISTRY           = "ghcr.io/brijesh-palta"           
     IMAGE_TAG          = ""
-    REG_HOST           = ""                                // computed
+    REG_HOST           = ""                               
     SONAR_HOST_URL     = "https://sonarcloud.io"
-    SONAR_ORG          = "brijesh-palta"                   // <— your SonarCloud org
-    SONAR_PROJECT_KEY  = "janak-travels"                   // <— your SonarCloud project key
+    SONAR_ORG          = "brijesh-palta"                   
+    SONAR_PROJECT_KEY  = "janak-travels"                   
     SONAR_DASHBOARD    = "https://sonarcloud.io/project/overview?id=janak-travels"
     GITHUB_REPO_URL    = "https://github.com/brijesh-palta/Janak-Travels"
   }
@@ -19,7 +19,7 @@ pipeline {
     buildDiscarder(logRotator(numToKeepStr: '30'))
   }
 
-  triggers { pollSCM('H/5 * * * *') }  // webhook ho to hata do
+  triggers { pollSCM('H/5 * * * *') }  
 
   stages {
 

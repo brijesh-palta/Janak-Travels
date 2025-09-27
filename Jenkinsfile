@@ -24,19 +24,21 @@ pipeline {
   stages {
 
     stage('1) Checkout & Version') {
-      steps {
-        checkout scm
-        script {
-          // Windows-safe short SHA
-          bat 'for /f "usebackq tokens=1" %i in (`git rev-parse --short HEAD`) do @echo %i>sha.txt'
-          def sha = readFile('sha.txt').trim()
-          env.IMAGE_TAG = "${env.BRANCH_NAME}-${env.BUILD_NUMBER}-${sha}"
-          env.REG_HOST  = (env.REGISTRY.split('/')[0])   // e.g. ghcr.io
-          echo "IMAGE_TAG=${env.IMAGE_TAG} | REG_HOST=${env.REG_HOST}"
-          echo "Repo: ${env.GITHUB_REPO_URL}"
-        }
-      }
+  steps {
+    checkout scm
+    script {
+      // get short SHA safely on Windows
+      bat '''
+      for /f "usebackq tokens=1" %%i in (`git rev-parse --short HEAD`) do @echo %%i>sha.txt
+      '''
+      def sha = readFile('sha.txt').trim()
+      env.IMAGE_TAG = "${env.BRANCH_NAME}-${env.BUILD_NUMBER}-${sha}"
+      env.REG_HOST  = (env.REGISTRY.split('/')[0])   // e.g. ghcr.io
+      echo "IMAGE_TAG=${env.IMAGE_TAG} | REG_HOST=${env.REG_HOST}"
     }
+  }
+}
+
 
     stage('2) PHP Lint (via Docker)') {
       steps {

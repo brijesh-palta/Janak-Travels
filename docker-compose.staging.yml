@@ -1,0 +1,8 @@
+# docker-compose.staging.yml
+services:
+  web:
+    build: .
+    image: janak-travels:staging
+    ports:
+      - "8081:80"
+    restart: unless-stopped

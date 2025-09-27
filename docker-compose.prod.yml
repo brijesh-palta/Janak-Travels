@@ -1,6 +1,5 @@
 services:
   web:
-    image: ghcr.io/<your-user>/janak-travels:${IMAGE_TAG:-latest}
+    image: ghcr.io/brijesh-palta/janak-travels:${IMAGE_TAG:-latest}
     ports:
       - "80:80"
-    restart: unless-stopped

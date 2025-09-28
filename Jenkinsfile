@@ -1,109 +1,99 @@
 /*******************************************************
- * Janak Travels – CI/CD Pipeline
+ * Janak Travels – CI/CD Pipeline (Windows Agent)
  *
  * Description:
- * End-to-end CI/CD for a PHP application containerized
- * with Docker. Stages include source checkout, PHP lint,
- * static analysis with SonarCloud, container build,
- * optional image security scanning, staging deployment,
- * smoke tests, optional registry push, and production
- * placeholders for deploy and monitoring.
+ * End-to-end CI/CD for a PHP app containerized with Docker.
+ * Stages: checkout → PHP lint → SonarCloud → image build →
+ * (optional) Trivy scan → staging deploy (docker compose) →
+ * smoke tests → (optional) push → prod placeholders.
  *
- * Agent/OS:
- * Windows Jenkins agent with Docker Desktop.
+ * Agent: Windows (Jenkins node) with Docker Desktop.
  *
- * Required Jenkins Credentials:
- *   - github-credentials  : for SCM checkout (already in multibranch)
- *   - sonar-token         : SonarCloud token (Secret text)
- *   - ghcr                : Token/password to push to GitHub Container Registry (optional)
+ * Jenkins Credentials:
+ *   - github-credentials : SCM (in multibranch)
+ *   - sonar-token        : SonarCloud token (Secret text)
+ *   - ghcr               : (optional) push to GHCR
  *
- * External Prerequisites:
- *   - Docker Desktop installed on the agent and logged in at least once
- *   - SonarCloud project exists and is accessible by the sonar-token
- *   - docker-compose.staging.yml present in the repo
+ * External Prereqs:
+ *   - Docker Desktop installed & logged-in once
+ *   - SonarCloud project available to sonar-token
+ *   - docker-compose.staging.yml in repo root
  *******************************************************/
 
 pipeline {
   agent any
 
   options {
-    ansiColor('xterm')                               // Colored output
-    timestamps()                                     // Timestamp every line
-    buildDiscarder(logRotator(numToKeepStr: '15'))   // Keep last 15 builds
-    disableConcurrentBuilds()                        // Avoid overlapping runs
+    ansiColor('xterm')
+    timestamps()
+    buildDiscarder(logRotator(numToKeepStr: '15'))
+    disableConcurrentBuilds()
   }
 
   environment {
-    // Application naming
-    APP_NAME          = 'janak-travels'
-    BRANCH_NAME_SAFE  = "${env.BRANCH_NAME ?: 'main'}"
+    // App / branch
+    APP_NAME           = 'janak-travels'
+    BRANCH_NAME_SAFE   = "${env.BRANCH_NAME ?: 'main'}"
 
     // Image tags
-    IMAGE_LOCAL_TAG   = "${APP_NAME}:latest"
-    IMAGE_STAGING_TAG = "${APP_NAME}:staging"
-    IMAGE_PROD_TAG    = "${APP_NAME}:prod"
+    IMAGE_LOCAL_TAG    = "${APP_NAME}:latest"
+    IMAGE_STAGING_TAG  = "${APP_NAME}:staging"
+    IMAGE_PROD_TAG     = "${APP_NAME}:prod"
 
-    // Staging deploy (Docker Compose)
-    STAGING_PROJECT   = 'janak-staging'
-    STAGING_COMPOSE   = 'docker-compose.staging.yml'
-    STAGING_HTTP_PORT = '8081'
-    STAGING_URL       = "http://localhost:${STAGING_HTTP_PORT}"
+    // Staging (compose)
+    STAGING_PROJECT    = 'janak-staging'
+    STAGING_COMPOSE    = 'docker-compose.staging.yml'
+    STAGING_HTTP_PORT  = '8081'
+    STAGING_URL        = "http://localhost:${STAGING_HTTP_PORT}"
 
-    // Registry push (optional)
-    REG_PUSH          = 'false'                      // set to 'true' to enable stage 9
-    REG_HOST          = 'ghcr.io'
-    REG_NAMESPACE     = 'brijesh-palta'
-    REG_CREDENTIALS_ID= 'ghcr'
-    REG_IMAGE         = "${REG_HOST}/${REG_NAMESPACE}/${APP_NAME}"
+    // Optional registry push
+    REG_PUSH           = 'false'     // 'true' to enable stage 9
+    REG_HOST           = 'ghcr.io'
+    REG_NAMESPACE      = 'brijesh-palta'
+    REG_CREDENTIALS_ID = 'ghcr'
+    REG_IMAGE          = "${REG_HOST}/${REG_NAMESPACE}/${APP_NAME}"
 
     // SonarCloud
-    SONAR_HOST_URL    = 'https://sonarcloud.io'
-    SONAR_ORG         = 'brijesh-palta'              // organization key (slug with hyphen)
-    SONAR_PROJECT_KEY = 'Janak-Travels'              // must match key in SonarCloud UI
+    SONAR_HOST_URL     = 'https://sonarcloud.io'
+    SONAR_ORG          = 'brijesh-palta'
+    SONAR_PROJECT_KEY  = 'Janak-Travels'
 
-    // Security scan (optional)
-    TRIVY_ENABLED     = 'false'                      // set to 'true' to enable stage 5
-    TRIVY_IMAGE       = 'aquasec/trivy:latest'
+    // Trivy optional
+    TRIVY_ENABLED      = 'false'
+    TRIVY_IMAGE        = 'aquasec/trivy:latest'
   }
 
   stages {
 
     /*********************************************************
-     * 0) Ensure Docker Daemon Running (Windows only)
-     * Purpose:
-     *   - Start the Docker Windows service if present and not
-     *     running, then wait until the daemon responds.
-     * Notes:
-     *   - Uses PowerShell through a batch step.
+     * 0) Ensure Docker Daemon Running (Windows)
+     *   - Use native Jenkins 'powershell' (no caret mishaps)
      *********************************************************/
     stage('0) Ensure Docker Running') {
       steps {
-        bat '''
-        @echo on
-        rem Attempt to start the Windows service for Docker Desktop if available
-        powershell -NoProfile -Command ^
-          "$svc = Get-Service -Name 'com.docker.service' -ErrorAction SilentlyContinue; ^
-           if ($null -ne $svc -and $svc.Status -ne 'Running') { Start-Service -Name 'com.docker.service' }"
+        powershell '''
+          $ErrorActionPreference = "Stop"
 
-        rem Wait up to ~60 seconds for Docker daemon to become responsive
-        setlocal enabledelayedexpansion
-        set /a _wait=0
-        :wait_loop
-          docker info >nul 2>&1
-          if !errorlevel! == 0 goto docker_ok
-          if !_wait! GEQ 30 goto docker_fail
-          timeout /t 2 >nul
-          set /a _wait+=1
-          goto wait_loop
+          # Start Docker service if present and not running
+          $svc = Get-Service -Name 'com.docker.service' -ErrorAction SilentlyContinue
+          if ($svc -and $svc.Status -ne 'Running') {
+            Start-Service -Name 'com.docker.service'
+          }
 
-        :docker_ok
-        echo Docker is running.
-        docker version
-        goto :eof
+          # Wait up to 60s for daemon to respond
+          $deadline = (Get-Date).AddSeconds(60)
+          $ok = $false
+          while(-not $ok -and (Get-Date) -lt $deadline) {
+            try {
+              docker info *> $null
+              $ok = $true
+            } catch {
+              Start-Sleep -Seconds 2
+            }
+          }
+          if (-not $ok) { throw "Docker daemon did not become ready in time." }
 
-        :docker_fail
-        echo ERROR: Docker daemon did not become ready in time.
-        exit /b 1
+          docker version
         '''
       }
     }
@@ -114,10 +104,10 @@ pipeline {
     stage('1) Checkout & Version') {
       steps {
         checkout scm
-        script {
-          bat '''
+        bat '''
           for /F "usebackq tokens=1" %%i in (`git rev-parse --short HEAD`) do @echo %%i > sha.txt
-          '''
+        '''
+        script {
           def sha = readFile('sha.txt').trim()
           echo "Checkout completed. Current commit SHA: ${sha}"
         }
@@ -125,41 +115,38 @@ pipeline {
     }
 
     /***************************************
-     * 2) PHP Syntax Lint using php:8.2-cli
+     * 2) PHP Syntax Lint via php:8.2-cli
      ***************************************/
     stage('2) PHP Lint (via Docker)') {
       steps {
-        // Quick failure if Docker disappears after stage 0
         bat 'docker version'
-        // Run php -l across all PHP files inside a disposable container
         bat """
-        docker run --rm -v "%WORKSPACE%":/app -w /app php:8.2-cli ^
-          bash -lc "set -e; find . -type f -name '*.php' -print0 | xargs -0 -n1 php -l"
+          docker run --rm -v "%WORKSPACE%":/app -w /app php:8.2-cli ^
+            bash -lc "set -e; find . -type f -name '*.php' -print0 | xargs -0 -n1 php -l"
         """
       }
     }
 
     /***************************************************
-     * 3) Static Code Analysis – SonarCloud
-     *    Uses official sonar-scanner-cli Docker image.
+     * 3) Static Code Analysis – SonarCloud (Dockerized)
      ***************************************************/
     stage('3) Code Quality (SonarCloud)') {
       steps {
         withCredentials([string(credentialsId: 'sonar-token', variable: 'SC_TOKEN')]) {
           bat """
-          docker run --rm -e SONAR_TOKEN=%SC_TOKEN% ^
-            -v "%WORKSPACE%":/usr/src sonarsource/sonar-scanner-cli:5 ^
-            sonar-scanner ^
-              -Dsonar.host.url=${SONAR_HOST_URL} ^
-              -Dsonar.organization=${SONAR_ORG} ^
-              -Dsonar.projectKey=${SONAR_PROJECT_KEY}
+            docker run --rm -e SONAR_TOKEN=%SC_TOKEN% ^
+              -v "%WORKSPACE%":/usr/src sonarsource/sonar-scanner-cli:5 ^
+              sonar-scanner ^
+                -Dsonar.host.url=${SONAR_HOST_URL} ^
+                -Dsonar.organization=${SONAR_ORG} ^
+                -Dsonar.projectKey=${SONAR_PROJECT_KEY}
           """
         }
       }
     }
 
     /***********************************************
-     * 4) Build Docker Image from repository Dockerfile
+     * 4) Build Docker Image
      ***********************************************/
     stage('4) Build Docker Image') {
       steps {
@@ -169,61 +156,60 @@ pipeline {
 
     /************************************************************
      * 5) Image Security Scan with Trivy (optional)
-     *    Set TRIVY_ENABLED=true in environment to enable.
      ************************************************************/
     stage('5) Security Scan (Trivy)') {
       when { expression { env.TRIVY_ENABLED == 'true' } }
       steps {
         bat """
-        docker run --rm ^
-          -v /var/run/docker.sock:/var/run/docker.sock ^
-          -v "%USERPROFILE%/.cache/trivy":/root/.cache/ ^
-          ${TRIVY_IMAGE} image ${IMAGE_LOCAL_TAG}
+          docker run --rm ^
+            -v /var/run/docker.sock:/var/run/docker.sock ^
+            -v "%USERPROFILE%/.cache/trivy":/root/.cache/ ^
+            ${TRIVY_IMAGE} image ${IMAGE_LOCAL_TAG}
         """
       }
     }
 
     /*********************************************************
-     * 6) Free Staging Port
-     *    Remove any container already bound to the staging port.
+     * 6) Free Staging Port if occupied
      *********************************************************/
     stage('6) Free Port (if used)') {
       steps {
         bat """
-        for /F "tokens=*" %%i in ('docker ps -q --filter "publish=${STAGING_HTTP_PORT}"') do @docker rm -f %%i
+          for /F "tokens=*" %%i in ('docker ps -q --filter "publish=${STAGING_HTTP_PORT}"') do @docker rm -f %%i
         """
       }
     }
 
     /********************************************
-     * 7) Deploy to Staging via Docker Compose
+     * 7) Deploy to Staging (docker compose)
      ********************************************/
     stage('7) Deploy Staging') {
       steps {
         bat """
-        docker compose -p ${STAGING_PROJECT} -f ${STAGING_COMPOSE} down || exit /b 0
-        docker compose -p ${STAGING_PROJECT} -f ${STAGING_COMPOSE} up -d --build
+          docker compose -p ${STAGING_PROJECT} -f ${STAGING_COMPOSE} down || exit /b 0
+          docker compose -p ${STAGING_PROJECT} -f ${STAGING_COMPOSE} up -d --build
         """
       }
     }
 
     /********************************************
-     * 8) Smoke Test against Staging endpoints
+     * 8) Smoke Test (Staging)
      ********************************************/
     stage('8) Smoke Test (Staging)') {
       steps {
-        // Application health endpoint
+        // Health endpoint should return 200 (or output)
         bat "curl -fsS ${STAGING_URL}/health.php"
-        // Simple page check must return HTTP 200
+
+        // Login page must return HTTP 200
         bat """
-        curl -s -o NUL -w "HTTP_CODE=%%{http_code}" "${STAGING_URL}/loginpage.php" > status.txt
-        find "HTTP_CODE=200" status.txt >nul || (exit /b 1)
+          curl -s -o NUL -w "HTTP_CODE=%%{http_code}" "${STAGING_URL}/loginpage.php" > status.txt
+          find "HTTP_CODE=200" status.txt >nul || (echo Smoke test failed & exit /b 1)
         """
       }
     }
 
     /**************************************************************
-     * 9) Push to Registry (optional, main branch and REG_PUSH=true)
+     * 9) Push to Registry (optional; main + REG_PUSH=true)
      **************************************************************/
     stage('9) Push to Registry') {
       when {
@@ -235,31 +221,31 @@ pipeline {
       steps {
         withCredentials([string(credentialsId: env.REG_CREDENTIALS_ID, variable: 'REG_TOKEN')]) {
           bat """
-          echo %REG_TOKEN% | docker login ${REG_HOST} -u ${REG_NAMESPACE} --password-stdin
-          docker tag ${IMAGE_LOCAL_TAG} ${REG_IMAGE}:latest
-          docker push ${REG_IMAGE}:latest
+            echo %REG_TOKEN% | docker login ${REG_HOST} -u ${REG_NAMESPACE} --password-stdin
+            docker tag ${IMAGE_LOCAL_TAG} ${REG_IMAGE}:latest
+            docker push ${REG_IMAGE}:latest
           """
         }
       }
     }
 
     /*********************************************************
-     * 10) Production Deployment (placeholder – customize)
+     * 10) Production Deployment (placeholder)
      *********************************************************/
     stage('10) Deploy Production') {
       when { branch 'main' }
       steps {
-        echo "Production deployment placeholder. Replace with real production deployment logic."
+        echo "Production deployment placeholder — replace with real logic (SSH/WinRM/K8s/CDN, etc.)."
       }
     }
 
     /*********************************************************
-     * 11) Production Monitoring (placeholder – customize)
+     * 11) Production Monitoring (placeholder)
      *********************************************************/
     stage('11) Monitoring: Production') {
       when { branch 'main' }
       steps {
-        echo "Production monitoring placeholder. Add health checks here."
+        echo "Production monitoring placeholder — add your health checks / Synthetics / APM here."
       }
     }
   }
@@ -272,7 +258,6 @@ pipeline {
       echo "Pipeline failed — check logs of failed stage"
     }
     always {
-      // Quick view of containers after the run
       bat "docker ps --format \"table {{.ID}}\\t{{.Names}}\\t{{.Status}}\\t{{.Ports}}\""
     }
   }

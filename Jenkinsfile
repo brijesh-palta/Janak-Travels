@@ -1,74 +1,116 @@
 /*******************************************************
  * Janak Travels – CI/CD Pipeline
- * 
- * Description:
- * This Jenkinsfile defines an end-to-end CI/CD workflow
- * for a PHP application containerized with Docker. It
- * includes source checkout, code validation, static
- * analysis with SonarCloud, security scanning, staging
- * deployment, smoke testing, container registry push,
- * production deployment, and monitoring.
  *
- * Pre-requisites:
- * - Jenkins running with Docker installed and accessible.
- * - Docker Desktop must be running on the agent machine.
- * - SonarCloud account with project key configured.
- * - Jenkins credentials created:
- *   • github-credentials (for GitHub SCM)
- *   • sonarcloud-token (SonarCloud access token)
- *   • ghcr (GitHub Container Registry token, if pushing)
+ * Description:
+ * End-to-end CI/CD for a PHP application containerized
+ * with Docker. Stages include source checkout, PHP lint,
+ * static analysis with SonarCloud, container build,
+ * optional image security scanning, staging deployment,
+ * smoke tests, optional registry push, and production
+ * placeholders for deploy and monitoring.
+ *
+ * Agent/OS:
+ * Windows Jenkins agent with Docker Desktop.
+ *
+ * Required Jenkins Credentials:
+ *   - github-credentials  : for SCM checkout (already in multibranch)
+ *   - sonar-token         : SonarCloud token (Secret text)
+ *   - ghcr                : Token/password to push to GitHub Container Registry (optional)
+ *
+ * External Prerequisites:
+ *   - Docker Desktop installed on the agent and logged in at least once
+ *   - SonarCloud project exists and is accessible by the sonar-token
+ *   - docker-compose.staging.yml present in the repo
  *******************************************************/
 
 pipeline {
   agent any
 
   options {
-    ansiColor('xterm')                         // Adds colored output in Jenkins logs
-    timestamps()                               // Prepends each log line with a timestamp
-    buildDiscarder(logRotator(numToKeepStr: '15')) // Retain only last 15 builds
-    disableConcurrentBuilds()                  // Prevent parallel runs of this pipeline
+    ansiColor('xterm')                               // Colored output
+    timestamps()                                     // Timestamp every line
+    buildDiscarder(logRotator(numToKeepStr: '15'))   // Keep last 15 builds
+    disableConcurrentBuilds()                        // Avoid overlapping runs
   }
 
   environment {
-    // Application settings
+    // Application naming
     APP_NAME          = 'janak-travels'
     BRANCH_NAME_SAFE  = "${env.BRANCH_NAME ?: 'main'}"
 
-    // Docker images and tags
+    // Image tags
     IMAGE_LOCAL_TAG   = "${APP_NAME}:latest"
     IMAGE_STAGING_TAG = "${APP_NAME}:staging"
     IMAGE_PROD_TAG    = "${APP_NAME}:prod"
 
-    // Staging deployment configuration
-    STAGING_COMPOSE   = 'docker-compose.staging.yml'
+    // Staging deploy (Docker Compose)
     STAGING_PROJECT   = 'janak-staging'
+    STAGING_COMPOSE   = 'docker-compose.staging.yml'
     STAGING_HTTP_PORT = '8081'
     STAGING_URL       = "http://localhost:${STAGING_HTTP_PORT}"
 
-    // Registry configuration (set REG_PUSH=true to enable pushing)
-    REG_PUSH          = 'false'
+    // Registry push (optional)
+    REG_PUSH          = 'false'                      // set to 'true' to enable stage 9
     REG_HOST          = 'ghcr.io'
     REG_NAMESPACE     = 'brijesh-palta'
     REG_CREDENTIALS_ID= 'ghcr'
     REG_IMAGE         = "${REG_HOST}/${REG_NAMESPACE}/${APP_NAME}"
 
-    // SonarCloud configuration
+    // SonarCloud
     SONAR_HOST_URL    = 'https://sonarcloud.io'
-    SONAR_ORG         = 'brijesh-palta'
-    SONAR_PROJECTKEY  = 'janak-travels'
+    SONAR_ORG         = 'brijesh-palta'              // organization key (slug with hyphen)
+    SONAR_PROJECT_KEY = 'Janak-Travels'              // must match key in SonarCloud UI
 
-    // Security scanning (set TRIVY_ENABLED=true to enable)
-    TRIVY_ENABLED     = 'false'
+    // Security scan (optional)
+    TRIVY_ENABLED     = 'false'                      // set to 'true' to enable stage 5
     TRIVY_IMAGE       = 'aquasec/trivy:latest'
   }
 
   stages {
 
-    /********************
-     * 1) Source Checkout
-     * Purpose: Retrieve source code from GitHub SCM.
-     * Also records short commit hash for traceability.
-     ********************/
+    /*********************************************************
+     * 0) Ensure Docker Daemon Running (Windows only)
+     * Purpose:
+     *   - Start the Docker Windows service if present and not
+     *     running, then wait until the daemon responds.
+     * Notes:
+     *   - Uses PowerShell through a batch step.
+     *********************************************************/
+    stage('0) Ensure Docker Running') {
+      steps {
+        bat '''
+        @echo on
+        rem Attempt to start the Windows service for Docker Desktop if available
+        powershell -NoProfile -Command ^
+          "$svc = Get-Service -Name 'com.docker.service' -ErrorAction SilentlyContinue; ^
+           if ($null -ne $svc -and $svc.Status -ne 'Running') { Start-Service -Name 'com.docker.service' }"
+
+        rem Wait up to ~60 seconds for Docker daemon to become responsive
+        setlocal enabledelayedexpansion
+        set /a _wait=0
+        :wait_loop
+          docker info >nul 2>&1
+          if !errorlevel! == 0 goto docker_ok
+          if !_wait! GEQ 30 goto docker_fail
+          timeout /t 2 >nul
+          set /a _wait+=1
+          goto wait_loop
+
+        :docker_ok
+        echo Docker is running.
+        docker version
+        goto :eof
+
+        :docker_fail
+        echo ERROR: Docker daemon did not become ready in time.
+        exit /b 1
+        '''
+      }
+    }
+
+    /**********************************************
+     * 1) Source Checkout and Version Traceability
+     **********************************************/
     stage('1) Checkout & Version') {
       steps {
         checkout scm
@@ -82,15 +124,14 @@ pipeline {
       }
     }
 
-    /********************
-     * 2) Code Validation
-     * Purpose: Validate PHP syntax using php:8.2-cli.
-     * This acts as a lightweight unit test to catch
-     * syntax errors before progressing.
-     ********************/
+    /***************************************
+     * 2) PHP Syntax Lint using php:8.2-cli
+     ***************************************/
     stage('2) PHP Lint (via Docker)') {
       steps {
-        bat 'docker version' // Fail fast if Docker is not running
+        // Quick failure if Docker disappears after stage 0
+        bat 'docker version'
+        // Run php -l across all PHP files inside a disposable container
         bat """
         docker run --rm -v "%WORKSPACE%":/app -w /app php:8.2-cli ^
           bash -lc "set -e; find . -type f -name '*.php' -print0 | xargs -0 -n1 php -l"
@@ -98,47 +139,40 @@ pipeline {
       }
     }
 
-    /********************
-     * 3) Static Code Analysis
-     * Purpose: Run SonarCloud scanner to identify code
-     * quality issues, vulnerabilities, and maintainability
-     * metrics.
-     ********************/
+    /***************************************************
+     * 3) Static Code Analysis – SonarCloud
+     *    Uses official sonar-scanner-cli Docker image.
+     ***************************************************/
     stage('3) Code Quality (SonarCloud)') {
       steps {
-       withCredentials([string(credentialsId: 'sonar-token', variable: 'SC_TOKEN')]) {
-            bat """
-            docker run --rm -e SONAR_TOKEN=%SC_TOKEN% ^
-              -v "%WORKSPACE%":/usr/src sonarsource/sonar-scanner-cli:5 ^
-              sonar-scanner ^
-                -Dsonar.host.url=https://sonarcloud.io ^
-                -Dsonar.organization=brijesh-palta ^
-                -Dsonar.projectKey=Janak-Travels
-            """
+        withCredentials([string(credentialsId: 'sonar-token', variable: 'SC_TOKEN')]) {
+          bat """
+          docker run --rm -e SONAR_TOKEN=%SC_TOKEN% ^
+            -v "%WORKSPACE%":/usr/src sonarsource/sonar-scanner-cli:5 ^
+            sonar-scanner ^
+              -Dsonar.host.url=${SONAR_HOST_URL} ^
+              -Dsonar.organization=${SONAR_ORG} ^
+              -Dsonar.projectKey=${SONAR_PROJECT_KEY}
+          """
         }
       }
     }
 
-    /********************
-     * 4) Docker Image Build
-     * Purpose: Build container image using Dockerfile.
-     * This creates the runtime artifact for deployment.
-     ********************/
+    /***********************************************
+     * 4) Build Docker Image from repository Dockerfile
+     ***********************************************/
     stage('4) Build Docker Image') {
       steps {
         bat "docker build -t ${IMAGE_LOCAL_TAG} ."
       }
     }
 
-    /********************
-     * 5) Security Scan (Optional)
-     * Purpose: Run Trivy against the built image to
-     * identify known vulnerabilities.
-     ********************/
+    /************************************************************
+     * 5) Image Security Scan with Trivy (optional)
+     *    Set TRIVY_ENABLED=true in environment to enable.
+     ************************************************************/
     stage('5) Security Scan (Trivy)') {
-      when {
-        expression { env.TRIVY_ENABLED == 'true' }
-      }
+      when { expression { env.TRIVY_ENABLED == 'true' } }
       steps {
         bat """
         docker run --rm ^
@@ -149,11 +183,10 @@ pipeline {
       }
     }
 
-    /********************
-     * 6) Port Cleanup
-     * Purpose: Ensure staging port is free by removing
-     * any container already bound to that port.
-     ********************/
+    /*********************************************************
+     * 6) Free Staging Port
+     *    Remove any container already bound to the staging port.
+     *********************************************************/
     stage('6) Free Port (if used)') {
       steps {
         bat """
@@ -162,11 +195,9 @@ pipeline {
       }
     }
 
-    /********************
-     * 7) Staging Deployment
-     * Purpose: Deploy the application in staging
-     * environment using docker-compose.
-     ********************/
+    /********************************************
+     * 7) Deploy to Staging via Docker Compose
+     ********************************************/
     stage('7) Deploy Staging') {
       steps {
         bat """
@@ -176,14 +207,14 @@ pipeline {
       }
     }
 
-    /********************
-     * 8) Smoke Testing (Staging)
-     * Purpose: Validate application responsiveness on
-     * staging by checking health.php and login page.
-     ********************/
+    /********************************************
+     * 8) Smoke Test against Staging endpoints
+     ********************************************/
     stage('8) Smoke Test (Staging)') {
       steps {
+        // Application health endpoint
         bat "curl -fsS ${STAGING_URL}/health.php"
+        // Simple page check must return HTTP 200
         bat """
         curl -s -o NUL -w "HTTP_CODE=%%{http_code}" "${STAGING_URL}/loginpage.php" > status.txt
         find "HTTP_CODE=200" status.txt >nul || (exit /b 1)
@@ -191,11 +222,9 @@ pipeline {
       }
     }
 
-    /********************
-     * 9) Registry Push (Optional, main branch only)
-     * Purpose: Push built Docker image to GitHub Container
-     * Registry for long-term storage and distribution.
-     ********************/
+    /**************************************************************
+     * 9) Push to Registry (optional, main branch and REG_PUSH=true)
+     **************************************************************/
     stage('9) Push to Registry') {
       when {
         allOf {
@@ -214,29 +243,21 @@ pipeline {
       }
     }
 
-    /********************
-     * 10) Production Deployment (Optional)
-     * Purpose: Placeholder stage for production deployment
-     * using docker-compose, Kubernetes, or other platforms.
-     ********************/
+    /*********************************************************
+     * 10) Production Deployment (placeholder – customize)
+     *********************************************************/
     stage('10) Deploy Production') {
-      when {
-        branch 'main'
-      }
+      when { branch 'main' }
       steps {
         echo "Production deployment placeholder. Replace with real production deployment logic."
       }
     }
 
-    /********************
-     * 11) Production Monitoring (Optional)
-     * Purpose: Placeholder for health checks against
-     * production endpoints after deployment.
-     ********************/
+    /*********************************************************
+     * 11) Production Monitoring (placeholder – customize)
+     *********************************************************/
     stage('11) Monitoring: Production') {
-      when {
-        branch 'main'
-      }
+      when { branch 'main' }
       steps {
         echo "Production monitoring placeholder. Add health checks here."
       }
@@ -251,7 +272,8 @@ pipeline {
       echo "Pipeline failed — check logs of failed stage"
     }
     always {
-      bat 'docker ps --format "table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}"'
+      // Quick view of containers after the run
+      bat "docker ps --format \"table {{.ID}}\\t{{.Names}}\\t{{.Status}}\\t{{.Ports}}\""
     }
   }
 }

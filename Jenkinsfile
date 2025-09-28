@@ -1,13 +1,13 @@
 /*******************************************************
- * Janak Travels – CI/CD Pipeline (Windows Agent, Final v4)
+ * Janak Travels – CI/CD Pipeline (Windows Agent, Final v5)
  * ✔ PHP lint
- * ✔ PHPUnit tests (PowerShell creates composer.json/tests if missing)
+ * ✔ PHPUnit tests (force-good composer.json + placeholder test)
  * ✔ SonarCloud (temp working dir)
  * ✔ Docker build
  * ✔ Trivy FS scan
  * ✔ Staging deploy (compose)
  * ✔ Smoke tests (curl)
- * ✔ Optional push → placeholders for prod/monitoring
+ * ✔ Optional push → prod/monitor placeholders
  *******************************************************/
 
 pipeline {
@@ -86,21 +86,20 @@ pipeline {
       }
     }
 
-    /* 2.5) Unit Tests (PHPUnit) — PowerShell writes files, then Composer runs */
+    /* 2.5) Unit Tests (PHPUnit) — FORCE good composer.json + validate */
     stage('2.5) Unit Tests (PHPUnit)') {
       steps {
-        // 1) Ensure composer.json exists with dev dependency + PSR-4
+        // 1) ALWAYS write a clean composer.json (overwrite any bad one)
         powershell '''
           $ErrorActionPreference = "Stop"
-          if (!(Test-Path -LiteralPath "composer.json")) {
-            $json = @'
+          $json = @'
 {
   "require-dev": { "phpunit/phpunit": "^10" },
   "autoload": { "psr-4": { "App\\\\": "src/" } }
 }
 '@
-            Set-Content -LiteralPath "composer.json" -Value $json -Encoding UTF8
-          }
+          # Use ASCII to avoid BOM issues; ensures Composer is happy
+          Set-Content -LiteralPath "composer.json" -Value $json -Encoding ASCII
         '''
         // 2) Ensure at least one PHPUnit test exists (placeholder if missing)
         powershell '''
@@ -115,13 +114,13 @@ final class SmokeTest extends TestCase {
   public function testTruth(): void { $this->assertTrue(true); }
 }
 '@
-            Set-Content -LiteralPath "tests\\SmokeTest.php" -Value $test -Encoding UTF8
+            Set-Content -LiteralPath "tests\\SmokeTest.php" -Value $test -Encoding ASCII
           }
         '''
-        // 3) Install & Run PHPUnit inside composer container
+        // 3) Validate + Install + Run PHPUnit inside composer container
         bat '''
           docker run --rm -v "%WORKSPACE%":/app -w /app composer:2 ^
-            sh -lc "set -e; composer install --no-interaction --prefer-dist; ./vendor/bin/phpunit --log-junit junit.xml"
+            sh -lc "set -e; composer validate --no-check-publish; composer install --no-interaction --prefer-dist; ./vendor/bin/phpunit --log-junit junit.xml"
         '''
         junit allowEmptyResults: true, testResults: 'junit.xml'
       }

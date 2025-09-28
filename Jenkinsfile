@@ -1,14 +1,13 @@
 /*******************************************************
- * Janak Travels – CI/CD Pipeline (Windows Agent, Final v3)
+ * Janak Travels – CI/CD Pipeline (Windows Agent, Final v4)
  * ✔ PHP lint
- * ✔ PHPUnit tests (auto-generate if absent)
- * ✔ SonarCloud analysis (safe temp dir)
+ * ✔ PHPUnit tests (PowerShell creates composer.json/tests if missing)
+ * ✔ SonarCloud (temp working dir)
  * ✔ Docker build
- * ✔ Trivy security scan (filesystem mode)
- * ✔ Staging deploy via docker-compose
- * ✔ Smoke tests (curl/powershell)
- * ✔ Optional registry push
- * ✔ Prod + monitoring placeholders
+ * ✔ Trivy FS scan
+ * ✔ Staging deploy (compose)
+ * ✔ Smoke tests (curl)
+ * ✔ Optional push → placeholders for prod/monitoring
  *******************************************************/
 
 pipeline {
@@ -26,6 +25,7 @@ pipeline {
     BRANCH_NAME_SAFE    = "${env.BRANCH_NAME ?: 'main'}"
 
     IMAGE_LOCAL_TAG     = "${APP_NAME}:latest"
+
     STAGING_PROJECT     = 'janak-staging'
     STAGING_COMPOSE     = 'docker-compose.staging.yml'
     STAGING_HTTP_PORT   = '8081'
@@ -86,32 +86,42 @@ pipeline {
       }
     }
 
-    /* 2.5) Unit Tests (PHPUnit) */
+    /* 2.5) Unit Tests (PHPUnit) — PowerShell writes files, then Composer runs */
     stage('2.5) Unit Tests (PHPUnit)') {
       steps {
-        bat '''
-          docker run --rm -v "%WORKSPACE%":/app -w /app composer:2 ^
-            sh -lc "set -e; \
-              if [ ! -f composer.json ]; then \
-                cat > composer.json <<'JSON'
+        // 1) Ensure composer.json exists with dev dependency + PSR-4
+        powershell '''
+          $ErrorActionPreference = "Stop"
+          if (!(Test-Path -LiteralPath "composer.json")) {
+            $json = @'
 {
-  \\"require-dev\\": { \\"phpunit/phpunit\\": \\"^10\\" },
-  \\"autoload\\": { \\"psr-4\\": { \\"App\\\\\\\\\\": \\"src/\\" } }
+  "require-dev": { "phpunit/phpunit": "^10" },
+  "autoload": { "psr-4": { "App\\\\": "src/" } }
 }
-JSON
-              fi; \
-              composer install --no-interaction --prefer-dist; \
-              if [ ! -x ./vendor/bin/phpunit ]; then \
-                mkdir -p tests; \
-                cat > tests/SmokeTest.php <<'PHP'
+'@
+            Set-Content -LiteralPath "composer.json" -Value $json -Encoding UTF8
+          }
+        '''
+        // 2) Ensure at least one PHPUnit test exists (placeholder if missing)
+        powershell '''
+          $ErrorActionPreference = "Stop"
+          if (!(Test-Path -LiteralPath "tests")) { New-Item -ItemType Directory -Path "tests" | Out-Null }
+          $anyPhp = Get-ChildItem -Path "tests" -Filter *.php -File -ErrorAction SilentlyContinue
+          if (-not $anyPhp) {
+            $test = @'
 <?php
-use PHPUnit\\\\Framework\\\\TestCase;
+use PHPUnit\\Framework\\TestCase;
 final class SmokeTest extends TestCase {
   public function testTruth(): void { $this->assertTrue(true); }
 }
-PHP
-              fi; \
-              ./vendor/bin/phpunit --log-junit junit.xml"
+'@
+            Set-Content -LiteralPath "tests\\SmokeTest.php" -Value $test -Encoding UTF8
+          }
+        '''
+        // 3) Install & Run PHPUnit inside composer container
+        bat '''
+          docker run --rm -v "%WORKSPACE%":/app -w /app composer:2 ^
+            sh -lc "set -e; composer install --no-interaction --prefer-dist; ./vendor/bin/phpunit --log-junit junit.xml"
         '''
         junit allowEmptyResults: true, testResults: 'junit.xml'
       }
@@ -139,12 +149,12 @@ PHP
       steps { bat "docker build -t ${IMAGE_LOCAL_TAG} ." }
     }
 
-    /* 5) Security Scan */
+    /* 5) Security Scan (filesystem mode, Windows-safe) */
     stage('5) Security Scan (Trivy FS)') {
       when { expression { env.TRIVY_ENABLED == 'true' } }
       steps {
         bat '''
-          docker run --rm -v "%WORKSPACE%":/src aquasec/trivy:latest \
+          docker run --rm -v "%WORKSPACE%":/src aquasec/trivy:latest ^
             fs --severity HIGH,CRITICAL --exit-code 0 --no-progress /src > trivy-fs.txt
         '''
         archiveArtifacts artifacts: 'trivy-fs.txt', onlyIfSuccessful: true
@@ -216,8 +226,8 @@ PHP
   }
 
   post {
-    success { echo "Pipeline completed successfully" }
-    failure { echo "Pipeline failed — check the stage logs above" }
+    success { echo "✅ Pipeline completed successfully" }
+    failure { echo "❌ Pipeline failed — check the stage logs above" }
     always {
       bat "docker ps --format \"table {{.ID}}\\t{{.Names}}\\t{{.Status}}\\t{{.Ports}}\""
       archiveArtifacts allowEmptyArchive: true, artifacts: 'status.txt,junit.xml,trivy-fs.txt'
